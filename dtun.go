@@ -16,12 +16,26 @@ const MTU = 1500
 
 var tuns = sync.Map{}
 
+var ipcmd string
+
+func init() {
+	var err error
+	ipcmd, err = exec.LookPath("ip")
+	if err != nil {
+		panic(err)
+	}
+}
+
 type TUN struct {
 	id    string
 	local net.IP
 	peer  net.IP
 	c     *dtls.Conn
 	tun   *water.Interface
+}
+
+func (t *TUN) Name() string {
+	return t.tun.Name()
 }
 
 func (t *TUN) Close() {

@@ -5,12 +5,15 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
+	"os/exec"
 
 	"github.com/lvht/dtun"
 	"github.com/pion/dtls/v2"
 )
 
-var listen, host, key, id, peernet string
+var listen, host, key, id string
+var peernet, up string
 var port int
 
 func init() {
@@ -18,6 +21,7 @@ func init() {
 	flag.StringVar(&listen, "listen", "0.0.0.0", "server listen address")
 	flag.StringVar(&host, "host", "", "server address(client only)")
 	flag.StringVar(&key, "key", "", "pre-shared key(psk)")
+	flag.StringVar(&up, "up", "", "client up script")
 	flag.StringVar(&id, "id", "dtun", "psk hint")
 	flag.IntVar(&port, "port", 443, "server port")
 }
@@ -73,6 +77,20 @@ func dialTUN() {
 	// send local network, so the peer can ping
 	if _, err = c.Write([]byte(peernet)); err != nil {
 		log.Panic(err)
+	}
+
+	if up != "" {
+		cmd := exec.Command(up)
+		cmd.Env = []string{
+			fmt.Sprintf("TUN=%s", tun.Name()),
+			fmt.Sprintf("PEER_IP=%s", peer),
+			fmt.Sprintf("LOCAL_IP=%s", local),
+		}
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err = cmd.Run(); err != nil {
+			log.Panic(err)
+		}
 	}
 
 	tun.Loop()
