@@ -7,7 +7,6 @@ import (
 	"net"
 
 	"github.com/lvht/dtun"
-	"github.com/lvht/dtun/ip"
 	"github.com/pion/dtls/v2"
 )
 
@@ -18,21 +17,25 @@ func init() {
 	flag.StringVar(&listen, "listen", "0.0.0.0", "server listen address")
 	flag.StringVar(&host, "host", "", "server address(client only)")
 	flag.StringVar(&key, "key", "", "pre-shared key(psk)")
-	flag.StringVar(&id, "id", "", "psk hint")
+	flag.StringVar(&id, "id", "dtun", "psk hint")
 	flag.IntVar(&port, "port", 443, "server port")
 }
 
 func main() {
 	flag.Parse()
 
+	if key == "" {
+		panic("key is required")
+	}
+
 	if host != "" {
-		dial()
+		dialTUN()
 	} else {
 		listenTUN()
 	}
 }
 
-func dial() {
+func dialTUN() {
 	config := &dtls.Config{
 		PSK: func(hint []byte) ([]byte, error) {
 			log.Printf("Server's hint: %s \n", string(hint))
@@ -49,6 +52,8 @@ func dial() {
 	}
 	addr.Port = port
 
+	log.Println("dialing to ", addr)
+
 	c, err := dtls.Dial("udp", addr, config)
 	if err != nil {
 		panic(err)
@@ -62,7 +67,8 @@ func dial() {
 	local := net.IP(buf[:4])
 	peer := net.IP(buf[4:8])
 
-	dtun.Tun(c, local, peer)
+	tun := dtun.NewTUN(c, local, peer)
+	tun.Loop()
 }
 
 func listenTUN() {
@@ -70,6 +76,7 @@ func listenTUN() {
 
 	config := &dtls.Config{
 		PSK: func(hint []byte) ([]byte, error) {
+			dtun.CleanTUN(string(hint))
 			log.Printf("Client's hint: %s \n", string(hint))
 			return []byte(key), nil
 		},
@@ -77,6 +84,8 @@ func listenTUN() {
 		CipherSuites:         []dtls.CipherSuiteID{dtls.TLS_PSK_WITH_AES_128_CCM_8},
 		ExtendedMasterSecret: dtls.RequireExtendedMasterSecret,
 	}
+
+	log.Println("listening on ", addr)
 
 	ln, err := dtls.Listen("udp", addr, config)
 	if err != nil {
@@ -89,15 +98,15 @@ func listenTUN() {
 			panic(err)
 		}
 
-		local := ip.Reserve()
-		peer := ip.Reserve()
+		cc := c.(*dtls.Conn)
 
-		_, err = c.Write(append(peer.To4(), local.To4()...))
-		if err != nil {
-			log.Println(err)
+		tun := dtun.NewTUN(cc, nil, nil)
+
+		if err := tun.SendIP(); err != nil {
+			log.Println("SendIP error", err)
 			continue
 		}
 
-		go dtun.Tun(c, local, peer)
+		go tun.Loop()
 	}
 }
