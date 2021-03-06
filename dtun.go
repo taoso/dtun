@@ -35,6 +35,30 @@ func (t *TUN) SendIP() error {
 	return err
 }
 
+func (t *TUN) SetRoute() error {
+	buf := make([]byte, MTU)
+	n, err := t.c.Read(buf)
+	if err != nil {
+		return err
+	}
+
+	local := string(buf[:n])
+	if local == "empty" {
+		return nil
+	}
+
+	if _, _, err = net.ParseCIDR(local); err != nil {
+		log.Println("parse local network faild", err)
+		return err
+	}
+	args := []string{"route", "add", local, "via", t.peer.String()}
+	if err = exec.Command(ipcmd, args...).Run(); err != nil {
+		log.Println("route add faild", err)
+		return err
+	}
+	return nil
+}
+
 func (t *TUN) Loop() {
 	defer t.Close()
 
@@ -84,21 +108,4 @@ func CleanTUN(id string) {
 		tun.Close()
 		tuns.Delete(id)
 	}
-}
-
-func setRoute() {
-	// n, err := c.Read(buf)
-	// br := bytes.NewReader(buf)
-	//
-	// if local := req.Header.Get("Local-Network"); local != "" {
-	// 	if _, _, err = net.ParseCIDR(local); err != nil {
-	// 		log.Println("parse local network faild", err)
-	// 		return
-	// 	}
-	// 	args = []string{"route", "add", local, "via", clientIP.String()}
-	// 	if err = exec.Command(ipcmd, args...).Run(); err != nil {
-	// 		log.Println("route add faild", err)
-	// 		return
-	// 	}
-	// }
 }

@@ -10,10 +10,11 @@ import (
 	"github.com/pion/dtls/v2"
 )
 
-var listen, host, key, id string
+var listen, host, key, id, peernet string
 var port int
 
 func init() {
+	flag.StringVar(&peernet, "peernet", "empty", "client local network")
 	flag.StringVar(&listen, "listen", "0.0.0.0", "server listen address")
 	flag.StringVar(&host, "host", "", "server address(client only)")
 	flag.StringVar(&key, "key", "", "pre-shared key(psk)")
@@ -68,6 +69,12 @@ func dialTUN() {
 	peer := net.IP(buf[4:8])
 
 	tun := dtun.NewTUN(c, local, peer)
+
+	// send local network, so the peer can ping
+	if _, err = c.Write([]byte(peernet)); err != nil {
+		log.Panic(err)
+	}
+
 	tun.Loop()
 }
 
@@ -104,6 +111,13 @@ func listenTUN() {
 
 		if err := tun.SendIP(); err != nil {
 			log.Println("SendIP error", err)
+			tun.Close()
+			continue
+		}
+
+		if err := tun.SetRoute(); err != nil {
+			log.Println("SetRoute error", err)
+			tun.Close()
 			continue
 		}
 
