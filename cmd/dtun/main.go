@@ -120,7 +120,8 @@ func listenTUN() {
 	for {
 		c, err := ln.Accept()
 		if err != nil {
-			panic(err)
+			log.Println("Accept error", err)
+			continue
 		}
 
 		cc := c.(*dtls.Conn)
