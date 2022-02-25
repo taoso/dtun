@@ -1,4 +1,4 @@
-module github.com/lvht/dtun
+module github.com/taoso/dtun
 
 go 1.16
 

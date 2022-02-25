@@ -5,15 +5,15 @@
 ## 使用
 
 ```bash
-go get github.com/lvht/dtun/cmd/dtun
+go install github.com/taoso/dtun/cmd/dtun
 
 # 服务端
-go run main.go -key foo
+dtun -key foo
 
 # 客户端
 # key 参数需要跟服务端保持一致
 # id  参数不能跟其他隧道冲突，不然其他隧道会断线
-go run main.go -host ${server} -key foo -id demo
+dtun -host ${server} -key foo -id demo
 ```
 
 ## 设计
@@ -86,7 +86,7 @@ ip route add 10.0.0.0/16 via 10.1.0.1
 ip route add 0.0.0.0/1 via 10.1.0.2
 ip route add 128.0.0.0/1 via 10.1.0.2
 ```
-这里的 0.0.0.0/1 和 128.0.0.1/1 正好覆盖整个网段，效果赞同于 default，但又不会
+这里的`0.0.0.0/1`和`128.0.0.1/1`正好覆盖整个网段，效果等同于 default，但又不会
 覆盖默认路由。如果隧道异常关闭，所有相关路由会自动删除，非常稳定。
 
 你可以写成一个脚本，使用`-up`参数指定运行。我的脚本如下：

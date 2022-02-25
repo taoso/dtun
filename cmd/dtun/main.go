@@ -8,8 +8,8 @@ import (
 	"os"
 	"os/exec"
 
-	"github.com/lvht/dtun"
 	"github.com/pion/dtls/v2"
+	"github.com/taoso/dtun"
 )
 
 var listen, host, key, id string
