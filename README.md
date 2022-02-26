@@ -11,9 +11,7 @@ go install github.com/taoso/dtun/cmd/dtun
 dtun -key foo
 
 # 客户端
-# key 参数需要跟服务端保持一致
-# id  参数不能跟其他隧道冲突，不然其他隧道会断线
-dtun -host ${server} -key foo -id demo
+dtun -connect addr:port -key foo
 ```
 
 ## 设计

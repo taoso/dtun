@@ -8,7 +8,9 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/pion/dtls/v2"
@@ -45,6 +47,8 @@ func main() {
 	}
 }
 
+var tun *dtun.TUN
+
 func dialTUN() {
 	config := &dtls.Config{
 		PSK: func(hint []byte) ([]byte, error) {
@@ -59,6 +63,16 @@ func dialTUN() {
 	if err != nil {
 		panic(err)
 	}
+
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigs
+		if tun != nil {
+			tun.Close()
+		}
+		os.Exit(0)
+	}()
 
 	goto dial // skip sleep for first time
 loop:
@@ -98,7 +112,7 @@ dial:
 		goto loop
 	}
 
-	tun := dtun.NewTUN(c, local4, peer4, local6, peer6)
+	tun = dtun.NewTUN(c, local4, peer4, local6, peer6)
 
 	r := dtun.Meta{Routes: peernet}
 
