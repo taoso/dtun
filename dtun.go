@@ -1,20 +1,19 @@
 package dtun
 
 import (
+	"encoding/json"
 	"io"
 	"log"
 	"net"
+	"os"
 	"os/exec"
-	"sync"
 
 	"github.com/pion/dtls/v2"
 	"github.com/songgao/water"
-	"github.com/taoso/dtun/ip"
+	"inet.af/netaddr"
 )
 
 const MTU = 1500
-
-var tuns = sync.Map{}
 
 var ipcmd string
 
@@ -27,46 +26,74 @@ func init() {
 }
 
 type TUN struct {
-	id    string
-	local net.IP
-	peer  net.IP
-	c     *dtls.Conn
-	tun   *water.Interface
+	id     string
+	local4 netaddr.IP
+	peer4  netaddr.IP
+	local6 netaddr.IP
+	peer6  netaddr.IP
+	c      *dtls.Conn
+	Tun    *water.Interface
 }
 
 func (t *TUN) Name() string {
-	return t.tun.Name()
+	return t.Tun.Name()
 }
 
 func (t *TUN) Close() {
 	t.c.Close()
-	t.tun.Close()
-	ip.Release(t.local, t.peer)
+	t.Tun.Close()
 }
 
-func (t *TUN) SendIP() error {
-	_, err := t.c.Write(append(t.peer.To4(), t.local.To4()...))
-	return err
+type Meta struct {
+	Local4 string
+	Peer4  string
+	Local6 string
+	Peer6  string
+	Routes string
 }
 
-func (t *TUN) SetRoute() error {
+func (m *Meta) Read(c io.Reader) error {
 	buf := make([]byte, MTU)
-	n, err := t.c.Read(buf)
+	n, err := c.Read(buf)
 	if err != nil {
 		return err
 	}
 
-	local := string(buf[:n])
-	if local == "empty" {
-		return nil
-	}
+	return json.Unmarshal(buf[:n], m)
+}
 
-	if _, _, err = net.ParseCIDR(local); err != nil {
-		log.Println("parse local network faild", err)
+func (m *Meta) Send(c io.Writer) error {
+	b, err := json.Marshal(m)
+	if err != nil {
 		return err
 	}
-	args := []string{"route", "add", local, "via", t.peer.String()}
-	if err = exec.Command(ipcmd, args...).Run(); err != nil {
+	_, err = c.Write(b)
+	return err
+}
+
+func (t *TUN) SendIP() error {
+	m := Meta{
+		Local4: t.peer4.String(),
+		Peer4:  t.local4.String(),
+		Local6: t.peer6.String(),
+		Peer6:  t.local6.String(),
+	}
+	return m.Send(t.c)
+}
+
+func (t *TUN) SetRoute() error {
+	var m Meta
+
+	if err := m.Read(t.c); err != nil {
+		return err
+	}
+
+	if _, _, err := net.ParseCIDR(m.Routes); err != nil {
+		log.Println("parse local network error", err)
+		return err
+	}
+	args := []string{"route", "add", m.Routes, "via", t.peer4.String()}
+	if err := exec.Command(ipcmd, args...).Run(); err != nil {
 		log.Println("route add faild", err)
 		return err
 	}
@@ -79,47 +106,45 @@ func (t *TUN) Loop() {
 	go func() {
 		defer t.Close()
 		buf := make([]byte, MTU)
-		io.CopyBuffer(t.c, t.tun, buf)
+		io.CopyBuffer(t.c, t.Tun, buf)
 	}()
 
 	buf := make([]byte, MTU)
-	io.CopyBuffer(t.tun, t.c, buf)
+	io.CopyBuffer(t.Tun, t.c, buf)
 }
 
-func NewTUN(c *dtls.Conn, local, peer net.IP) *TUN {
+func NewTUN(c *dtls.Conn, local4, peer4, local6, peer6 netaddr.IP) *TUN {
 	id := string(c.ConnectionState().IdentityHint)
-
-	if local == nil || peer == nil {
-		local = ip.Reserve()
-		peer = ip.Reserve()
-	}
 
 	tun, err := water.New(water.Config{DeviceType: water.TUN})
 	if err != nil {
 		panic(err)
 	}
 
-	log.Printf("%s -> %s", local, peer)
+	log.Printf("%s -> %s", local4, peer4)
+	log.Printf("%s -> %s", local6, peer6)
 
-	args := []string{"link", "set", tun.Name(), "up"}
-	if err := exec.Command(ipcmd, args...).Run(); err != nil {
-		panic(err)
+	cmd("link", "set", tun.Name(), "up")
+	cmd("addr", "add", local4.String()+"/32", "peer", peer4.String(), "dev", tun.Name())
+	cmd("addr", "add", local6.String()+"/128", "peer", peer6.String(), "dev", tun.Name())
+
+	return &TUN{
+		id:     id,
+		local4: local4,
+		peer4:  peer4,
+		local6: local6,
+		peer6:  peer6,
+		c:      c,
+		Tun:    tun,
 	}
-
-	args = []string{"addr", "add", local.String(), "peer", peer.String(), "dev", tun.Name()}
-	if err := exec.Command(ipcmd, args...).Run(); err != nil {
-		panic(err)
-	}
-
-	t := &TUN{id: id, local: local, peer: peer, c: c, tun: tun}
-	tuns.Store(id, t)
-	return t
 }
 
-func CleanTUN(id string) {
-	if v, ok := tuns.Load(id); ok {
-		tun := v.(*TUN)
-		tun.Close()
-		tuns.Delete(id)
+func cmd(args ...string) {
+	cmd := exec.Command(ipcmd, args...)
+	cmd.Stderr = os.Stderr
+	cmd.Stdout = os.Stdout
+
+	if err := cmd.Run(); err != nil {
+		panic(err)
 	}
 }

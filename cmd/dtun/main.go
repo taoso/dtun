@@ -3,27 +3,32 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
 	"os/exec"
+	"sync"
+	"time"
 
 	"github.com/pion/dtls/v2"
 	"github.com/taoso/dtun"
+	"inet.af/netaddr"
 )
 
-var listen, host, key, id string
+var listen, connect, key, id string
 var peernet, up string
-var port int
+var pool6, pool4 string
 
 func init() {
-	flag.StringVar(&peernet, "peernet", "empty", "client local network")
-	flag.StringVar(&listen, "listen", "0.0.0.0", "server listen address")
-	flag.StringVar(&host, "host", "", "server address(client only)")
-	flag.StringVar(&key, "key", "", "pre-shared key(psk)")
+	flag.StringVar(&listen, "listen", "0.0.0.0:443", "server listen address(server)")
+	flag.StringVar(&pool6, "pool6", "fc00::/120", "client ipv6 pool(server)")
+	flag.StringVar(&pool4, "pool4", "10.0.0.0/24", "client ipv4 pool(server)")
+	flag.StringVar(&connect, "connect", "", "server address(client)")
+	flag.StringVar(&peernet, "peernet", "empty", "client local ipv4 network")
 	flag.StringVar(&up, "up", "", "client up script")
+	flag.StringVar(&key, "key", "", "pre-shared key(psk)")
 	flag.StringVar(&id, "id", "dtun", "psk hint")
-	flag.IntVar(&port, "port", 443, "server port")
 }
 
 func main() {
@@ -33,7 +38,7 @@ func main() {
 		panic("key is required")
 	}
 
-	if host != "" {
+	if connect != "" {
 		dialTUN()
 	} else {
 		listenTUN()
@@ -46,45 +51,70 @@ func dialTUN() {
 			log.Printf("Server's hint: %s \n", string(hint))
 			return []byte(key), nil
 		},
-		PSKIdentityHint:      []byte(id),
-		CipherSuites:         []dtls.CipherSuiteID{dtls.TLS_PSK_WITH_AES_128_CCM_8},
-		ExtendedMasterSecret: dtls.RequireExtendedMasterSecret,
+		PSKIdentityHint: []byte(id),
+		CipherSuites:    []dtls.CipherSuiteID{dtls.TLS_PSK_WITH_AES_128_CCM_8},
 	}
 
-	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", host, port))
+	addr, err := net.ResolveUDPAddr("udp", connect)
 	if err != nil {
 		panic(err)
 	}
-	addr.Port = port
 
-	log.Println("dialing to ", addr)
-
+	goto dial // skip sleep for first time
+loop:
+	time.Sleep(5 * time.Second)
+dial:
+	log.Println("dialing to", addr)
 	c, err := dtls.Dial("udp", addr, config)
 	if err != nil {
-		panic(err)
+		log.Println("Dial error", err)
+		goto loop
 	}
 
-	buf := make([]byte, dtun.MTU)
-	if _, err := c.Read(buf); err != nil {
-		log.Panic(err)
+	var m dtun.Meta
+	if err := m.Read(c); err != nil {
+		log.Println("Meta Read error", err)
+		goto loop
 	}
 
-	local := net.IP(buf[:4])
-	peer := net.IP(buf[4:8])
+	local4, err := netaddr.ParseIP(m.Local4)
+	if err != nil {
+		log.Println("parse local4 error", err)
+		goto loop
+	}
+	peer4, err := netaddr.ParseIP(m.Peer4)
+	if err != nil {
+		log.Println("parse peer4 error", err)
+		goto loop
+	}
+	local6, err := netaddr.ParseIP(m.Local6)
+	if err != nil {
+		log.Println("parse local6 error", err)
+		goto loop
+	}
+	peer6, err := netaddr.ParseIP(m.Peer6)
+	if err != nil {
+		log.Println("parse peer6 error", err)
+		goto loop
+	}
 
-	tun := dtun.NewTUN(c, local, peer)
+	tun := dtun.NewTUN(c, local4, peer4, local6, peer6)
 
-	// send local network, so the peer can ping
-	if _, err = c.Write([]byte(peernet)); err != nil {
-		log.Panic(err)
+	r := dtun.Meta{Routes: peernet}
+
+	if err = r.Send(c); err != nil {
+		log.Println("Meta Send error", err)
+		goto loop
 	}
 
 	if up != "" {
 		cmd := exec.Command(up)
 		cmd.Env = []string{
 			fmt.Sprintf("TUN=%s", tun.Name()),
-			fmt.Sprintf("PEER_IP=%s", peer),
-			fmt.Sprintf("LOCAL_IP=%s", local),
+			fmt.Sprintf("PEER_IP4=%s", peer4),
+			fmt.Sprintf("LOCAL_IP4=%s", local4),
+			fmt.Sprintf("PEER_IP6=%s", peer6),
+			fmt.Sprintf("LOCAL_IP6=%s", local6),
 		}
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -93,29 +123,49 @@ func dialTUN() {
 		}
 	}
 
-	tun.Loop()
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, dtun.MTU)
+		io.CopyBuffer(c, tun.Tun, buf)
+	}()
+
+	buf := make([]byte, dtun.MTU)
+	io.CopyBuffer(tun.Tun, c, buf)
+	tun.Close()
+
+	wg.Wait()
+	goto loop
 }
 
 func listenTUN() {
-	addr := &net.UDPAddr{IP: net.ParseIP(listen), Port: port}
-
 	config := &dtls.Config{
 		PSK: func(hint []byte) ([]byte, error) {
-			dtun.CleanTUN(string(hint))
 			log.Printf("Client's hint: %s \n", string(hint))
 			return []byte(key), nil
 		},
-		PSKIdentityHint:      []byte(id),
-		CipherSuites:         []dtls.CipherSuiteID{dtls.TLS_PSK_WITH_AES_128_CCM_8},
-		ExtendedMasterSecret: dtls.RequireExtendedMasterSecret,
+		PSKIdentityHint: []byte(id),
+		CipherSuites:    []dtls.CipherSuiteID{dtls.TLS_PSK_WITH_AES_128_CCM_8},
 	}
 
-	log.Println("listening on ", addr)
+	addr, err := net.ResolveUDPAddr("udp", listen)
+	if err != nil {
+		panic(err)
+	}
+
+	log.Println("listening on", addr)
 
 	ln, err := dtls.Listen("udp", addr, config)
 	if err != nil {
 		panic(err)
 	}
+
+	v4Pool := dtun.NewAddrPool(pool4)
+	v6Pool := dtun.NewAddrPool(pool6)
+
+	v4gw := v4Pool.Next()
+	v6gw := v6Pool.Next()
 
 	for {
 		c, err := ln.Accept()
@@ -126,20 +176,38 @@ func listenTUN() {
 
 		cc := c.(*dtls.Conn)
 
-		tun := dtun.NewTUN(cc, nil, nil)
+		v4 := v4Pool.Next()
+		v6 := v6Pool.Next()
 
-		if err := tun.SendIP(); err != nil {
-			log.Println("SendIP error", err)
-			tun.Close()
-			continue
-		}
+		t := dtun.NewTUN(cc, v4gw, v4, v6gw, v6)
 
-		if err := tun.SetRoute(); err != nil {
-			log.Println("SetRoute error", err)
-			tun.Close()
-			continue
-		}
+		go func() {
+			defer v4Pool.Release(v4)
+			defer v6Pool.Release(v6)
 
-		go tun.Loop()
+			if err := t.SendIP(); err != nil {
+				fmt.Println("SendIP", err)
+				return
+			}
+
+			if err := t.SetRoute(); err != nil {
+				fmt.Println("SetRoute", err)
+				return
+			}
+
+			var wg sync.WaitGroup
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				buf := make([]byte, dtun.MTU)
+				io.CopyBuffer(c, t.Tun, buf)
+			}()
+
+			buf := make([]byte, dtun.MTU)
+			io.CopyBuffer(t.Tun, c, buf)
+			t.Close()
+
+			wg.Wait()
+		}()
 	}
 }
