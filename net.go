@@ -37,6 +37,17 @@ func (p *AddrPool) Next() netaddr.IP {
 	return p.next
 }
 
+// NextPrefix 返回一个可用的网络地址，包含网段
+// 如果地址耗尽则返回空地址。
+func (p *AddrPool) NextPrefix() netaddr.IPPrefix {
+	ip := p.Next()
+	if ip.IsZero() {
+		return netaddr.IPPrefix{}
+	}
+
+	return netaddr.IPPrefixFrom(ip, p.p.Bits())
+}
+
 // Release 释放之前占用的地址。
 func (p *AddrPool) Release(ip netaddr.IP) {
 	p.m.Lock()

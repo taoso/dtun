@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/pion/dtls/v2"
 	"github.com/songgao/water"
@@ -27,10 +28,10 @@ func init() {
 
 type TUN struct {
 	id     string
-	local4 netaddr.IP
-	peer4  netaddr.IP
-	local6 netaddr.IP
-	peer6  netaddr.IP
+	local4 netaddr.IPPrefix
+	local6 netaddr.IPPrefix
+	peer4  netaddr.IPPrefix
+	peer6  netaddr.IPPrefix
 	c      *dtls.Conn
 	Tun    *water.Interface
 }
@@ -113,7 +114,7 @@ func (t *TUN) Loop() {
 	io.CopyBuffer(t.Tun, t.c, buf)
 }
 
-func NewTUN(c *dtls.Conn, local4, peer4, local6, peer6 netaddr.IP) *TUN {
+func NewTUN(c *dtls.Conn, local4, peer4, local6, peer6 netaddr.IPPrefix, client bool) *TUN {
 	id := string(c.ConnectionState().IdentityHint)
 
 	tun, err := water.New(water.Config{DeviceType: water.TUN})
@@ -121,18 +122,19 @@ func NewTUN(c *dtls.Conn, local4, peer4, local6, peer6 netaddr.IP) *TUN {
 		panic(err)
 	}
 
-	log.Printf("%s -> %s", local4, peer4)
-	log.Printf("%s -> %s", local6, peer6)
-
-	cmd("link", "set", tun.Name(), "up")
-	cmd("addr", "add", local4.String()+"/32", "peer", peer4.String(), "dev", tun.Name())
-	cmd("addr", "add", local6.String()+"/128", "peer", peer6.String(), "dev", tun.Name())
+	cmd("link", "set", tun.Name(), "up", "mtu", "1280")
+	cmd("addr", "add", local4.IP().String()+"/32", "peer", peer4.IP().String(), "dev", tun.Name())
+	if client {
+		cmd("addr", "add", local6.String(), "dev", tun.Name())
+	} else {
+		cmd("addr", "add", local6.IP().String()+"/128", "peer", peer6.IP().String(), "dev", tun.Name())
+	}
 
 	return &TUN{
 		id:     id,
 		local4: local4,
-		peer4:  peer4,
 		local6: local6,
+		peer4:  peer4,
 		peer6:  peer6,
 		c:      c,
 		Tun:    tun,
@@ -140,6 +142,7 @@ func NewTUN(c *dtls.Conn, local4, peer4, local6, peer6 netaddr.IP) *TUN {
 }
 
 func cmd(args ...string) {
+	log.Println(ipcmd, strings.Join(args, " "))
 	cmd := exec.Command(ipcmd, args...)
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = os.Stdout

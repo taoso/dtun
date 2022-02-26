@@ -57,11 +57,7 @@ func dialTUN() {
 		},
 		PSKIdentityHint: []byte(id),
 		CipherSuites:    []dtls.CipherSuiteID{dtls.TLS_PSK_WITH_AES_128_CCM_8},
-	}
-
-	addr, err := net.ResolveUDPAddr("udp", connect)
-	if err != nil {
-		panic(err)
+		MTU:             1480,
 	}
 
 	sigs := make(chan os.Signal, 1)
@@ -78,6 +74,11 @@ func dialTUN() {
 loop:
 	time.Sleep(5 * time.Second)
 dial:
+	addr, err := net.ResolveUDPAddr("udp", connect)
+	if err != nil {
+		panic(err)
+	}
+
 	log.Println("dialing to", addr)
 	c, err := dtls.Dial("udp", addr, config)
 	if err != nil {
@@ -91,28 +92,28 @@ dial:
 		goto loop
 	}
 
-	local4, err := netaddr.ParseIP(m.Local4)
+	local4, err := netaddr.ParseIPPrefix(m.Local4)
 	if err != nil {
 		log.Println("parse local4 error", err)
 		goto loop
 	}
-	peer4, err := netaddr.ParseIP(m.Peer4)
+	peer4, err := netaddr.ParseIPPrefix(m.Peer4)
 	if err != nil {
 		log.Println("parse peer4 error", err)
 		goto loop
 	}
-	local6, err := netaddr.ParseIP(m.Local6)
+	local6, err := netaddr.ParseIPPrefix(m.Local6)
 	if err != nil {
 		log.Println("parse local6 error", err)
 		goto loop
 	}
-	peer6, err := netaddr.ParseIP(m.Peer6)
+	peer6, err := netaddr.ParseIPPrefix(m.Peer6)
 	if err != nil {
 		log.Println("parse peer6 error", err)
 		goto loop
 	}
 
-	tun = dtun.NewTUN(c, local4, peer4, local6, peer6)
+	tun = dtun.NewTUN(c, local4, peer4, local6, peer6, true)
 
 	r := dtun.Meta{Routes: peernet}
 
@@ -141,12 +142,10 @@ dial:
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		buf := make([]byte, dtun.MTU)
-		io.CopyBuffer(c, tun.Tun, buf)
+		iocopy(c, tun.Tun)
 	}()
 
-	buf := make([]byte, dtun.MTU)
-	io.CopyBuffer(tun.Tun, c, buf)
+	iocopy(tun.Tun, c)
 	tun.Close()
 
 	wg.Wait()
@@ -161,6 +160,7 @@ func listenTUN() {
 		},
 		PSKIdentityHint: []byte(id),
 		CipherSuites:    []dtls.CipherSuiteID{dtls.TLS_PSK_WITH_AES_128_CCM_8},
+		MTU:             1480,
 	}
 
 	addr, err := net.ResolveUDPAddr("udp", listen)
@@ -178,8 +178,8 @@ func listenTUN() {
 	v4Pool := dtun.NewAddrPool(pool4)
 	v6Pool := dtun.NewAddrPool(pool6)
 
-	v4gw := v4Pool.Next()
-	v6gw := v6Pool.Next()
+	v4gw := v4Pool.NextPrefix()
+	v6gw := v6Pool.NextPrefix()
 
 	for {
 		c, err := ln.Accept()
@@ -190,14 +190,14 @@ func listenTUN() {
 
 		cc := c.(*dtls.Conn)
 
-		v4 := v4Pool.Next()
-		v6 := v6Pool.Next()
+		v4 := v4Pool.NextPrefix()
+		v6 := v6Pool.NextPrefix()
 
-		t := dtun.NewTUN(cc, v4gw, v4, v6gw, v6)
+		t := dtun.NewTUN(cc, v4gw, v4, v6gw, v6, false)
 
 		go func() {
-			defer v4Pool.Release(v4)
-			defer v6Pool.Release(v6)
+			defer v4Pool.Release(v4.IP())
+			defer v6Pool.Release(v6.IP())
 
 			if err := t.SendIP(); err != nil {
 				fmt.Println("SendIP", err)
@@ -205,23 +205,43 @@ func listenTUN() {
 			}
 
 			if err := t.SetRoute(); err != nil {
-				fmt.Println("SetRoute", err)
-				return
+				log.Println("SetRoute", err)
 			}
 
 			var wg sync.WaitGroup
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				buf := make([]byte, dtun.MTU)
-				io.CopyBuffer(c, t.Tun, buf)
+				iocopy(c, t.Tun)
 			}()
 
-			buf := make([]byte, dtun.MTU)
-			io.CopyBuffer(t.Tun, c, buf)
+			iocopy(t.Tun, c)
 			t.Close()
 
 			wg.Wait()
 		}()
+	}
+}
+
+func iocopy(dst io.Writer, src io.Reader) error {
+	var fn func(time.Duration) error
+	if f, ok := dst.(interface{ SetWriteDeadline(time.Duration) error }); ok {
+		fn = f.SetWriteDeadline
+	}
+
+	buf := make([]byte, dtun.MTU)
+	for {
+		n, err := src.Read(buf)
+		if err != nil {
+			return err
+		}
+
+		if fn != nil {
+			fn(5 * time.Second)
+		}
+
+		if _, err = dst.Write(buf[:n]); err != nil {
+			return err
+		}
 	}
 }
