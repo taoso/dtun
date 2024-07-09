@@ -2,6 +2,8 @@
 
 非常简单的 IP 隧道，基于 DTLS。
 
+如果没有强加密🔐需求，可以考虑使用更为轻量的 [utun](https://github.com/taoso/utun/)😄
+
 ## 使用
 
 ```bash
